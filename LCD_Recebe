@@ -1,0 +1,299 @@
+#include <msp430.h>
+
+// Configurar USCI_A0
+void USCI_A0_config(void){
+    UCA0CTL1 = UCSWRST; //RST=1 para USCI_A0
+    UCA0CTL0 = 0; //sem paridade, 8 bits, 1 stop, modo UART
+    UCA0BRW = 3; //Divisor
+    UCA0MCTL = UCBRS_3; //Modulador = 3 e UCOS=0
+    P3SEL |= BIT4 | BIT3; //Disponibilizar pinos
+    UCA0CTL1 = UCSSEL_1; //RST=0, ACLK
+}
+
+// ER8.6 USCI_A0 com HC-05 - Brincadeira com Frases
+//
+// HC-05: VCC = +5 V
+// HC-05: GND = GND
+// HC-05: RXD = P3.3 (USCI_A0: TXD)
+// HC-05: TXD = P3.4 (USCI_A0: RXD)
+// USCI_A0 Recebe números e envia frases
+// 9.600 bauds (ACLK), 8 bits, sem paridade, 1 stop
+
+#include <msp430.h>
+#define TRUE    1
+#define FALSE   0
+
+// Definicao do endereco do PCF_8574
+#define PCF_ADR1 0x3F
+#define PCF_ADR2 0x27
+#define PCF_ADR  PCF_ADR2
+
+#define BR_100K    11  //SMCLK/100K = 11
+#define BR_50K     21  //SMCLK/50K  = 21
+#define BR_10K    105  //SMCLK/10K  = 105
+
+void lcd_inic(void);
+void lcd_aux(char dado);
+int pcf_read(void);
+void pcf_write(char dado);
+int pcf_teste(char adr);
+void led_vd(void);
+void led_VD(void);
+void led_vm(void);
+void led_VM(void);
+void i2c_config(void);
+void gpio_config(void);
+void delay(long limite);
+
+
+#define TOTAL 7 //Quantidade de frases
+char bt_ler(void);
+void bt_str(char *vet);
+void bt_char(char c);
+void USCI_A0_config(void);
+
+void switch_comandos(char x);
+
+int main(void){
+
+    WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
+
+    gpio_config();
+    i2c_config();
+
+    if (pcf_teste(PCF_ADR)==FALSE){
+        led_VM();           //Indicar que nao houve ACK
+        while(TRUE);        //Travar
+    }
+    else    led_VD();       //Houve ACK, tudo certo
+
+    lcd_inic();     //Inicializar LCD
+    pcf_write(8);   //Acender Back Light
+    char opc;
+    char msg[]={"Opcoes de 1 ateh X.\n"}; //Mensagem de limite
+    WDTCTL = WDTPW | WDTHOLD; // stop watchdog timer
+    msg[10000]=0x30+TOTAL; //Limite de escolhas
+    USCI_A0_config();
+    while(TRUE){
+        bt_str("\n>>> Escolha uma opção ou '?'.");
+        opc=bt_ler();
+        bt_str(" ["); bt_char(opc); bt_str("]\n"); //Indicar escolha
+        if (opc=='?') bt_str(msg); //Escolha = ?
+        else{
+            opc = opc-0x30; //Foi número?
+            if ( opc>0 && opc<(TOTAL+1)) switch_comandos(opc);
+            else switch_comandos(0);
+        }
+    }
+    return 0;
+}
+
+void switch_comandos(char x){
+    switch(x){
+    case 0:
+        lcd_str("Opcao Invalida");
+        bt_str("Opcao Invalida");
+
+
+        break; //00
+    case 1:
+        lcd_str("LETS GO");
+        bt_str("LETS GO");
+        break;//01
+    }
+}
+// Receber um caractere serial. Elimina '\n' ou '\r'
+// Prende esperando chegar algo
+char bt_ler(void){
+    char c='\n';
+    while (c=='\n' || c=='\r'){ //Consumir '\n' e '\r'
+        while ( (UCA0IFG&UCRXIFG)==0); //Esperar RXIFG=1
+        c=UCA0RXBUF; //Ler buffer
+    }
+    return c;
+}
+// Enviar uma string pela serial
+void bt_str(char *vet){
+    unsigned int i=0;
+    while (vet[i] != '\0')
+        bt_char(vet[i++]);
+}
+// Enviar um caracter pela serial
+void bt_char(char c){
+    while ( (UCA0IFG&UCTXIFG)==0); //Esperar TXIFG=1
+    UCA0TXBUF=c;
+}
+
+
+void lcd_char(char x){
+    char msb,lsb;
+    msb= x&0xF0;
+    lsb = (x&0xF)<<4;
+
+    pcf_write(msb | 0x9);
+    pcf_write(msb | 0xD);
+    pcf_write(msb | 0x9);
+
+    pcf_write(lsb | 0x9);
+    pcf_write(lsb | 0xD);
+    pcf_write(lsb | 0x9);
+
+
+}
+void lcd_cursor(char x){
+    x|=0x80;
+    char msb,lsb;
+    msb= x&0xF0;
+    lsb = (x&0xF)<<4;
+
+    pcf_write(msb | 0x8);
+    pcf_write(msb | 0xC);
+    pcf_write(msb | 0x8);
+
+    pcf_write(lsb | 0x8);
+    pcf_write(lsb | 0xC);
+    pcf_write(lsb | 0x8);
+
+
+}
+
+void lcd_str( char *pt){
+    char i;
+    i=0;
+    while(pt[i]!= 0){
+        lcd_char(pt[i]);
+        i++;
+    }
+}
+
+void lcd_dec8(char x){
+    char aux;
+    aux = x/100;
+    lcd_char(aux +0x30);
+    x=x-100*aux;
+    aux=x/10;
+    lcd_char(aux +0x30);
+    aux= x - 10*aux;
+    lcd_char(aux +0x30);
+}
+
+
+// Incializar LCD modo 4 bits
+void lcd_inic(void){
+
+    // Preparar I2C para operar
+    UCB0I2CSA = PCF_ADR;    //Endereco Escravo
+    UCB0CTL1 |= UCTR    |   //Mestre TX
+            UCTXSTT;    //Gerar START
+    while ( (UCB0IFG & UCTXIFG) == 0);          //Esperar TXIFG=1
+    UCB0TXBUF = 0;                              //Saída PCF = 0;
+    while ( (UCB0CTL1 & UCTXSTT) == UCTXSTT);   //Esperar STT=0
+    if ( (UCB0IFG & UCNACKIFG) == UCNACKIFG)    //NACK?
+        while(1);
+
+    // Comecar inicializacao
+    lcd_aux(0);     //RS=RW=0, BL=1
+    delay(20000);
+    lcd_aux(3);     //3
+    delay(10000);
+    lcd_aux(3);     //3
+    delay(10000);
+    lcd_aux(3);     //3
+    delay(10000);
+    lcd_aux(2);     //2
+
+    // Entrou em modo 4 bits
+    lcd_aux(2);     lcd_aux(8);     //0x28
+    lcd_aux(0);     lcd_aux(8);     //0x08
+    lcd_aux(0);     lcd_aux(1);     //0x01
+    lcd_aux(0);     lcd_aux(6);     //0x06
+    lcd_aux(0);     lcd_aux(0xF);   //0x0F
+
+    while ( (UCB0IFG & UCTXIFG) == 0)   ;          //Esperar TXIFG=1
+    UCB0CTL1 |= UCTXSTP;                           //Gerar STOP
+    while ( (UCB0CTL1 & UCTXSTP) == UCTXSTP)   ;   //Esperar STOP
+    delay(50);
+}
+
+// Auxiliar inicializacao do LCD (RS=RW=0)
+// * Só serve para a inicializacao *
+void lcd_aux(char dado){
+    while ( (UCB0IFG & UCTXIFG) == 0);              //Esperar TXIFG=1
+    UCB0TXBUF = ((dado<<4)&0XF0) | BIT3;            //PCF7:4 = dado;
+    delay(50);
+    while ( (UCB0IFG & UCTXIFG) == 0);              //Esperar TXIFG=1
+    UCB0TXBUF = ((dado<<4)&0XF0) | BIT3 | BIT2;     //E=1
+    delay(50);
+    while ( (UCB0IFG & UCTXIFG) == 0);              //Esperar TXIFG=1
+    UCB0TXBUF = ((dado<<4)&0XF0) | BIT3;            //E=0;
+}
+
+// Ler a porta do PCF
+int pcf_read(void){
+    int dado;
+    UCB0I2CSA = PCF_ADR;                //Endereco Escravo
+    UCB0CTL1 &= ~UCTR;                  //Mestre RX
+    UCB0CTL1 |= UCTXSTT;                //Gerar START
+    while ( (UCB0CTL1 & UCTXSTT) == UCTXSTT);
+    UCB0CTL1 |= UCTXSTP;                //Gerar STOP + NACK
+    while ( (UCB0CTL1 & UCTXSTP) == UCTXSTP)   ;   //Esperar STOP
+    while ( (UCB0IFG & UCRXIFG) == 0);  //Esperar RX
+    dado=UCB0RXBUF;
+    return dado;
+}
+
+// Escrever dado na porta
+void pcf_write(char dado){
+    UCB0I2CSA = PCF_ADR;        //Endereco Escravo
+    UCB0CTL1 |= UCTR    |       //Mestre TX
+            UCTXSTT;        //Gerar START
+    while ( (UCB0IFG & UCTXIFG) == 0)   ;          //Esperar TXIFG=1
+    UCB0TXBUF = dado;                              //Escrever dado
+    while ( (UCB0CTL1 & UCTXSTT) == UCTXSTT)   ;   //Esperar STT=0
+    if ( (UCB0IFG & UCNACKIFG) == UCNACKIFG)       //NACK?
+        while(1);                          //Escravo gerou NACK
+    UCB0CTL1 |= UCTXSTP;                        //Gerar STOP
+    while ( (UCB0CTL1 & UCTXSTP) == UCTXSTP)   ;   //Esperar STOP
+}
+
+// Testar endereco I2C
+// TRUE se recebeu ACK
+int pcf_teste(char adr){
+    UCB0I2CSA = adr;                            //Endereco do PCF
+    UCB0CTL1 |= UCTR | UCTXSTT;                 //Gerar START, Mestre transmissor
+    while ( (UCB0IFG & UCTXIFG) == 0);          //Esperar pelo START
+    UCB0CTL1 |= UCTXSTP;                        //Gerar STOP
+    while ( (UCB0CTL1 & UCTXSTP) == UCTXSTP);   //Esperar pelo STOP
+    if ((UCB0IFG & UCNACKIFG) == 0)     return TRUE;
+    else                                return FALSE;
+}
+
+// Configurar UCSB0 e Pinos I2C
+// P3.0 = SDA e P3.1=SCL
+void i2c_config(void){
+    UCB0CTL1 |= UCSWRST;    // UCSI B0 em ressete
+    UCB0CTL0 = UCSYNC |     //Síncrono
+            UCMODE_3 |   //Modo I2C
+            UCMST;       //Mestre
+    UCB0BRW = BR_100K;      //100 kbps
+    P3SEL |=  BIT1 | BIT0;  // Use dedicated module
+    UCB0CTL1 = UCSSEL_2;    //SMCLK e remove ressete
+}
+
+void led_vd(void)   {P4OUT &= ~BIT7;}   //Apagar verde
+void led_VD(void)   {P4OUT |=  BIT7;}   //Acender verde
+void led_vm(void)   {P1OUT &= ~BIT0;}   //Apagar vermelho
+void led_VM(void)   {P1OUT |=  BIT0;}   //Acender vermelho
+
+// Configurar leds
+void gpio_config(void){
+    P1DIR |=  BIT0;      //Led vermelho
+    P1OUT &= ~BIT0;      //Vermelho Apagado
+    P4DIR |=  BIT7;      //Led verde
+    P4OUT &= ~BIT7;      //Verde Apagado
+}
+
+void delay(long limite){
+    volatile long cont=0;
+    while (cont++ < limite) ;
+}
